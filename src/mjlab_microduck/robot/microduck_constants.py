@@ -134,9 +134,15 @@ HOME_FRAME = EntityCfg.InitialStateCfg(
 )
 
 FULL_COLLISION = CollisionCfg(
-    # 只让脚底 sole 与地面碰撞; 电池/大腿等其余 *_collision geom 保持 XML 里的
-    # self_collision_only (contype=2, 只自碰撞) 或 visual (contype=0), 不碰地面。
-    # 避免"坐地时电池+大腿托底", 使塌陷只能靠脚底支撑。
+    geom_names_expr=[r".*_collision"],
+)
+
+# 仅脚底与地面碰撞（velocity/walk 专用）。电池/大腿等其余 *_collision geom 保持
+# XML 里的 self_collision_only (contype=2, 只自碰撞) 或 visual (contype=0)，不碰地面。
+# 目的：避免 walk 任务里"坐地时电池+大腿托底"，使塌陷只能靠脚底支撑。
+# 注意：起身/坐站等 body-on-ground 任务必须用 FULL_COLLISION（头壳/下颌/髋/腿
+# 需要与地面接触），不能用这个。
+WALK_COLLISION = CollisionCfg(
     geom_names_expr=[r"^(left|right)_foot_collision$"],
     condim={r"^(left|right)_foot_collision$": 3},
     priority={r"^(left|right)_foot_collision$": 1},
@@ -235,7 +241,7 @@ MICRODUCK_WALK_ROBOT_CFG = EntityCfg(
     # otherwise.
     spec_fn=get_openmicroduck_walk_spec if USE_HD1910 else get_walk_spec,
     init_state=HOME_FRAME,
-    collisions=(FULL_COLLISION,),
+    collisions=(WALK_COLLISION,),
     articulation=EntityArticulationInfoCfg(
         actuators=(actuators,),
         soft_joint_pos_limit_factor=0.9,
@@ -282,7 +288,7 @@ MICRODUCK_BACKLASH_ROBOT_CFG = EntityCfg(
 MICRODUCK_WALK_BACKLASH_ROBOT_CFG = EntityCfg(
     spec_fn=get_walk_backlash_spec,
     init_state=BACKLASH_HOME_FRAME,
-    collisions=(FULL_COLLISION,),
+    collisions=(WALK_COLLISION,),
     articulation=EntityArticulationInfoCfg(
         actuators=(backlash_actuators,),
         soft_joint_pos_limit_factor=0.9,
