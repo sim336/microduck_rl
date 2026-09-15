@@ -10,6 +10,7 @@ motor-converted model). These tests lock the two halves together:
 """
 
 import importlib.util
+import sys
 from pathlib import Path
 
 import mujoco
@@ -17,6 +18,14 @@ import numpy as np
 import pytest
 
 REPO = Path(__file__).resolve().parents[1]
+
+# infer_policy.py imports `termios` (POSIX-only, for keyboard input) at module
+# top, so the rehearsal script cannot be imported on Windows. Training and the
+# CPU rehearsal are Linux/onboard workflows; skip these mirror tests there.
+pytestmark = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="infer_policy.py imports POSIX-only termios",
+)
 
 
 @pytest.fixture(scope="module")
@@ -31,24 +40,33 @@ def ip():
 
 def test_cpu_bam_constants_mirror_training_cfg(ip):
     from bam.mjlab import BamActuator
-    from mjlab_microduck.robot.microduck_constants import _BAM_ACTUATOR_KWARGS as k
+    from mjlab_microduck.robot.microduck_constants import (
+        _BAM_ACTUATOR_KWARGS as k,
+    )
 
-    assert ip.BAM_MOTOR_NAME == k["motor_name"]
-    assert ip.BAM_MODEL == k["model"]
     assert ip.BAM_KP_FW == k["kp_fw"]
     assert ip.BAM_VIN_RANGE == k["vin_range"]
-    assert ip.BAM_VIN_DROP_GAIN_RANGE == k["vin_drop_gain_range"]
+    assert ip.BAM_VIN_DROP_RESISTANCE_RANGE == k["vin_drop_resistance_range"]
     assert ip.BAM_VIN_MIN == k["vin_min"]
     assert ip.BAM_MAX_CURRENT == k.get("max_current")
+    # The rehearsal script must use the SAME actuator the policies are trained
+    # against: HD-1910 M5 (bundled in bam) when enabled, else the bundled XL330.
+    assert ip.BAM_MOTOR_NAME == k["motor_name"], (
+        "infer_policy.py BAM_MOTOR_NAME must match the training actuator"
+    )
+    assert ip.BAM_MODEL == k["model"], (
+        "infer_policy.py BAM_MODEL must match the training actuator model"
+    )
+    assert ip.BAM_JSON_PATH is None  # bundled motor params; no local override json
     assert ip.BAM_STIFF_SOLREF_FRICTION == BamActuator._STIFF_SOLREF_FRICTION
     assert ip.BAM_STIFF_SOLIMP_FRICTION == BamActuator._STIFF_SOLIMP_FRICTION
 
 
 @pytest.fixture(scope="module")
 def bam_sim(ip):
-    bam_model = ip.load_bam_model(ip.BAM_KP_FW, 7.4, ip.BAM_MAX_CURRENT)
+    bam_model = ip.load_bam_model(ip.BAM_KP_FW, 5.0, ip.BAM_MAX_CURRENT)
     model, data, ctrl, names = ip.load_mujoco_with_bam(
-        str(REPO / ip.MICRODUCK_XML), bam_model, 0.005, 0.1, ip.BAM_VIN_MIN
+        str(REPO / ip.MICRODUCK_XML), bam_model, 0.005, 0.02, ip.BAM_VIN_MIN
     )
     return ip, bam_model, model, data, ctrl, names
 
@@ -65,7 +83,7 @@ def test_actuators_converted_like_warp(bam_sim):
     # (set_to_motor leaves the old PD biasprm bytes behind; inert under BIAS_NONE,
     # exactly as in warp's edit_spec.)
     assert (model.actuator_forcelimited == 1).all()
-    assert np.allclose(model.actuator_forcerange[:, 1], 7.4 * kt / R)
+    assert np.allclose(model.actuator_forcerange[:, 1], 5.0 * kt / R)
     dofs = model.jnt_dofadr[model.actuator_trnid[:, 0]]
     assert np.allclose(model.dof_armature[dofs], bam_model.actuator.get_extra_inertia())
     assert np.allclose(model.dof_solref[dofs], ip.BAM_STIFF_SOLREF_FRICTION)

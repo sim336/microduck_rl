@@ -332,7 +332,7 @@ def make_microduck_velocity_env_cfg(
     # not by an explicit stillness/no-stepping term.
     cfg.rewards["air_time"].weight = 3.0
     cfg.rewards["air_time"].params["command_threshold"] = 0.01
-    cfg.rewards["air_time"].params["threshold_min"] = 0.125
+    cfg.rewards["air_time"].params["threshold_min"] = 0.125  # 对齐官方(joyandai) air_time 参数
     cfg.rewards["air_time"].params["threshold_max"] = 0.300
 
     cfg.rewards["body_ang_vel"].weight = -0.05
@@ -916,7 +916,7 @@ MicroduckRlCfg = RslRlOnPolicyRunnerCfg(
         obs_normalization=True,
         distribution_cfg={
             "class_name": "GaussianDistribution",
-            "init_std": 1.0,
+            "init_std": 0.5,  # 1.0(float软舵机) → 0.5(官方 09-04 诊断: HD-1910 kp=32 低压下大探索噪声饱和乱蹬→学不动)
             "std_type": "scalar",
         },
     ),

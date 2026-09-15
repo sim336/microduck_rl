@@ -22,6 +22,7 @@ Three things must hold, none of which fails loudly on its own:
    decide.
 """
 
+import os
 import shutil
 import subprocess
 import sys
@@ -71,16 +72,29 @@ def test_our_train_script_only_delegates_to_mjlab():
 def test_train_on_path_is_a_mjlab_trainer():
     """Catches the vanished-script failure directly: `train` must be ours or
     mjlab's, never whatever else is installed on the machine."""
-    exe = shutil.which("train")
+    # The active venv's script dir is authoritative: under `uv run --with
+    # pytest` a uv temp build dir (liblinear's `train`) can shadow the venv on
+    # PATH, and on Windows console-script launchers are binary stubs embedding
+    # no "mjlab" text — so verify the venv script functionally.
+    script = Path(sys.executable).parent / ("train.exe" if os.name == "nt" else "train")
+    exe = script if script.exists() else shutil.which("train")
     assert exe is not None, (
         "no `train` on PATH — the venv script was uninstalled and not recreated; "
         "run `uv sync --reinstall-package mjlab-microduck`."
     )
-    head = Path(exe).read_bytes()[:8192]
-    assert b"mjlab" in head, (
-        f"`train` resolves to {exe}, which is not a mjlab trainer. bin/train was "
-        "uninstalled and this is an unrelated binary from PATH."
-    )
+    if os.name == "nt":
+        proc = subprocess.run([str(exe), "--help"], capture_output=True, text=True)
+        out = proc.stdout + proc.stderr
+        assert "usage: train" in out, (
+            f"`train` resolves to {exe}, which is not a mjlab trainer. bin/train "
+            "was uninstalled and this is an unrelated binary from PATH."
+        )
+    else:
+        head = Path(exe).read_bytes()[:8192]
+        assert b"mjlab" in head, (
+            f"`train` resolves to {exe}, which is not a mjlab trainer. bin/train was "
+            "uninstalled and this is an unrelated binary from PATH."
+        )
 
 
 def test_we_register_the_task_plugin_entry_point():

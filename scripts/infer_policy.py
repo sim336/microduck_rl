@@ -13,6 +13,7 @@ import termios
 import threading
 import time
 import tty
+from pathlib import Path
 import numpy as np
 import mujoco
 import mujoco.viewer
@@ -30,12 +31,16 @@ MICRODUCK_BALL_XML = "src/mjlab_microduck/robot/microduck/scene_ball.xml"
 # trained against in warp). Not imported from there: that module drags in
 # mjlab/torch/warp (~16 s import) for a CPU rehearsal script. Locked by
 # tests/test_infer_policy_bam.py.
-BAM_MOTOR_NAME = "xl330"
-BAM_MODEL = "m6"
-BAM_KP_FW = 200.0                 # microduck's preserved firmware stiffness
-BAM_VIN_RANGE = (6.5, 8.2)        # per-env battery voltage DR in training
-BAM_VIN_DROP_GAIN_RANGE = (0.0, 0.2)  # load-dependent sag V_drop = gain * sum|tau|
-BAM_VIN_MIN = 6.0                 # floor on effective voltage after sag
+# OpenMicroDuck: Feetech HD-1910-C001 CALIBRATED M5 params (bundled in the
+# vendored bam 1.0.2 at bam/params/hd1910/m5.json, identified on the pendulum
+# bench at 5.0-5.2 V). The real robot is powered by a regulated 5.0 V rail.
+BAM_JSON_PATH = None  # bundled motor params (below); set to a json to override
+BAM_MOTOR_NAME = "hd1910"
+BAM_MODEL = "m5"
+BAM_KP_FW = 32.0                  # HD-1910 firmware Kp (reg50, read back on the servo)
+BAM_VIN_RANGE = (4.75, 5.25)      # per-env battery voltage DR in training (5 V regulated rail)
+BAM_VIN_DROP_RESISTANCE_RANGE = (0.0, 0.069)  # load sag V_drop = R * I_bat (battery+wire resistance)
+BAM_VIN_MIN = 4.0                  # HD-1910 working-voltage floor (spec: 4-8.4 V; low-voltage alarm)
 BAM_MAX_CURRENT = None            # training runs WITHOUT the firmware current limiter
 # Stiff joint-friction constraint, copied from bam.mjlab.BamActuator
 # (stiff_frictionloss=True in training): warp has no noslip solver, so BAM
@@ -46,16 +51,19 @@ BAM_STIFF_SOLIMP_FRICTION = (0.99, 0.9999, 0.001, 0.5, 2.0)
 
 
 def load_bam_model(kp_fw: float, vin: float, max_current):
-    """Build the BAM M6 model + XL330 voltage-controlled actuator."""
+    """Build the BAM M6 model + HD-1910 voltage-controlled actuator."""
     from bam.model import load_model
-    bam_model = load_model(motor_name=BAM_MOTOR_NAME, model=BAM_MODEL)
+    if BAM_JSON_PATH:
+        bam_model = load_model(json_file=BAM_JSON_PATH)
+    else:
+        bam_model = load_model(motor_name=BAM_MOTOR_NAME, model=BAM_MODEL)
     bam_model.actuator.kp = kp_fw
     bam_model.actuator.vin = vin
     bam_model.actuator.max_current = max_current if (max_current and max_current > 0) else None
     return bam_model
 
 
-def load_mujoco_with_bam(xml_path: str, bam_model, timestep: float, vin_drop_gain, vin_min):
+def load_mujoco_with_bam(xml_path: str, bam_model, timestep: float, vin_drop_resistance, vin_min):
     """Load the scene and hand every non-passive actuator to bam.mujoco.MujocoController.
 
     Mirrors bam.mjlab.BamActuator.edit_spec (what warp does at training time):
@@ -95,10 +103,10 @@ def load_mujoco_with_bam(xml_path: str, bam_model, timestep: float, vin_drop_gai
     model.opt.timestep = timestep
     data = mujoco.MjData(model)
     bam_ctrl = MujocoController(bam_model, names, model, data,
-                                vin_drop_gain=vin_drop_gain, vin_min=vin_min)
-    print(f"BAM {BAM_MODEL} actuators on {len(names)} joints: kt={kt:.4f} R={R:.4f} "
+                                vin_drop_resistance=vin_drop_resistance, vin_min=vin_min)
+    print(f"BAM {bam_model.name} actuators on {len(names)} joints: kt={kt:.4f} R={R:.4f} "
           f"vin={bam_model.actuator.vin:.2f}V kp_fw={bam_model.actuator.kp:.0f} "
-          f"vin_drop_gain={vin_drop_gain} vin_min={vin_min} "
+          f"vin_drop_resistance={vin_drop_resistance} vin_min={vin_min} "
           f"max_current={bam_model.actuator.max_current} forcerange=+/-{force_limit:.3f}Nm "
           f"armature={bam_model.actuator.get_extra_inertia():.2e}")
     return model, data, bam_ctrl, names
@@ -926,12 +934,14 @@ def main():
     parser.add_argument("--no-bam", action="store_true",
                         help="Use the XML MuJoCo position actuators instead of the BAM M6 "
                              "voltage/friction model the policies are trained against.")
-    parser.add_argument("--vin", type=float, default=7.4,
+    parser.add_argument("--vin", type=float, default=5.0,
                         help="BAM battery voltage [V]. Training samples per-env in "
-                             f"{BAM_VIN_RANGE}; 7.4 = nominal 2S LiPo.")
-    parser.add_argument("--vin-drop-gain", type=float, default=0.1,
-                        help="BAM load-dependent voltage sag gain [V/Nm], V = vin - gain*sum|tau|. "
-                             f"Training samples per-env in {BAM_VIN_DROP_GAIN_RANGE}. 0 disables.")
+                             f"{BAM_VIN_RANGE}; 5.0 = nominal regulated rail.")
+    parser.add_argument("--vin-drop-resistance", type=float, default=0.02,
+                        help="BAM load-dependent voltage sag resistance [Ohm], "
+                             "V = vin - R*I_bat. "
+                             f"Training samples per-env in {BAM_VIN_DROP_RESISTANCE_RANGE}. "
+                             "0 disables.")
     parser.add_argument("--kp-fw", type=float, default=BAM_KP_FW,
                         help="BAM firmware P-gain (training uses %(default)s).")
     parser.add_argument("--current-limit", type=float, default=0.0,
@@ -989,14 +999,14 @@ def main():
     print(f"Loading MuJoCo model from: {xml_path}")
     bam_ctrl = None
     if not args.no_bam:
-        # Same actuator the policies are trained against in warp (BAM M6 XL330,
+        # Same actuator the policies are trained against in warp (BAM HD-1910 M5,
         # voltage control + load-dependent friction budget), driven on CPU by
         # bam.mujoco.MujocoController. Voltage DR collapses to fixed --vin /
-        # --vin-drop-gain (training samples them per env).
+        # --vin-drop-resistance (training samples them per env).
         bam_model = load_bam_model(args.kp_fw, args.vin, args.current_limit)
-        vin_drop_gain = args.vin_drop_gain if args.vin_drop_gain > 0 else None
+        vin_drop_resistance = (args.vin_drop_resistance if args.vin_drop_resistance > 0 else None)
         model, data, bam_ctrl, _bam_names = load_mujoco_with_bam(
-            xml_path, bam_model, 0.005, vin_drop_gain, BAM_VIN_MIN)
+            xml_path, bam_model, 0.005, vin_drop_resistance, BAM_VIN_MIN)
     else:
         model = mujoco.MjModel.from_xml_path(xml_path)
         model.opt.timestep = 0.005
@@ -1009,7 +1019,10 @@ def main():
     # controller instead (see load_bam_model). kt comes from the bam package.
     if args.no_bam and args.current_limit and args.current_limit > 0:
         from bam.model import load_model
-        kt = load_model(motor_name="xl330", model="m6").kt.value
+        if BAM_JSON_PATH:
+            kt = load_model(json_file=BAM_JSON_PATH).kt.value
+        else:
+            kt = load_model(motor_name=BAM_MOTOR_NAME, model=BAM_MODEL).kt.value
         torque_limit = kt * args.current_limit
         model.actuator_forcerange[:, 0] = -torque_limit
         model.actuator_forcerange[:, 1] = torque_limit

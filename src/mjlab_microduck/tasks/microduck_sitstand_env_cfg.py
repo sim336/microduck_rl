@@ -325,7 +325,15 @@ def make_microduck_sitstand_env_cfg(
         params={
             "command_name": "twist",
             "max_height":   0.125,
-            "max_vz":       MAX_RISE_SPEED,  # explosive launch can't out-earn a gentle rise
+            # max_vz deliberately UNCAPPED (None) — the standup lesson
+            # (microduck_standup_env_cfg.com_upward_velocity): capping the
+            # rewarded rise speed — even at a generous 0.30 — shrank the payoff
+            # of noisy recovery ATTEMPTS during discovery and the rise never
+            # got learned. The rise needs a brief vz>0.08 burst to rock over
+            # the heels; a 0.08 cap left that burst unrewarded while rise_speed
+            # penalised it, so no rise was ever consolidated (flat rise_bootstrap
+            # ~0.0035 through iter 4000). Smoothness is enforced separately by
+            # the LATE-phased rise_speed curriculum, not by capping the reward.
         },
     )
 
@@ -849,24 +857,25 @@ def make_microduck_sitstand_env_cfg(
         },
     )
 
-    # Rise-speed cap — introduced only AFTER the rise motion exists (the
-    # standup attempt-tax lesson: any motion-tax during discovery makes
-    # exploratory attempts net-negative and the skill is never found).
-    # Pushed 750/1250 → 1500/2500: the rise needs a brief dynamic burst to
-    # rock over the heels (vz > 0.08 for a few steps), and the first
-    # sign-fixed run stalled in a head-down forward fold — a half-finished
-    # rise — consistent with the cap taxing the final weight shift while it
-    # was still being consolidated. Sit-direction gentleness doesn't depend
-    # on this cap (descent_speed covers it), so late is cheap. If the rise
-    # degrades when this kicks in, soften the final stage — never earlier.
+    # Rise-speed cap — introduced only AFTER the rise motion has been
+    # CONSOLIDATED, never during discovery (the standup attempt-tax lesson:
+    # any motion-tax during discovery makes exploratory attempts net-negative
+    # and the skill is never found). Originally 1500/2500, it landed while the
+    # rise was still being discovered and rise_bootstrap ran flat ~0.0035
+    # through iter 4000: no rise was ever produced. With warm-start from the
+    # WORKING standup policy (which already rises), this cap must stay OFF well
+    # past the warm-start (iter ~7000) so the rise survives the sit-command
+    # re-adaptation — taxing it there could break the transferred skill. Stages
+    # are absolute steps; pushed to 9000/11000 (~2000-4000 iters into the
+    # warm-start). If the transferred rise thrashes, push these out further.
     cfg.curriculum["rise_speed_weight"] = CurriculumTermCfg(
         func=microduck_mdp.reward_weight,
         params={
             "reward_name":   "rise_speed",
             "weight_stages": [
                 {"step": 0,          "weight": 0.0},
-                {"step": 1500 * 24,  "weight": 5.0},
-                {"step": 2500 * 24,  "weight": 10.0},
+                {"step": 9000 * 24,  "weight": 5.0},
+                {"step": 11000 * 24, "weight": 10.0},
             ],
         },
     )

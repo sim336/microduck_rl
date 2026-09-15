@@ -74,11 +74,26 @@ def test_torch_source_is_pinned_to_a_cuda_index_on_aarch64():
     )
     sources = uv_cfg["sources"]["torch"]
     indexes = {p["name"]: p["url"] for p in uv_cfg.get("index", [])}
+    # Every off-PyPI torch source must name a PyTorch CUDA index.
     for src in sources:
-        assert "aarch64" in src["marker"], "the torch source must stay aarch64-scoped"
         assert indexes[src["index"]].startswith(_CUDA_INDEX), (
             f"index {src['index']} is not a PyTorch CUDA index"
         )
+    # The aarch64 routing must still be present (the original invariant):
+    # PyPI's linux-aarch64 torch wheel is CPU-only, so without this entry
+    # `train` dies in mjlab's select_gpus() before iteration 0.
+    assert any("aarch64" in src["marker"] for src in sources), (
+        "the torch source must keep an aarch64-scoped entry -> aarch64 falls "
+        "back to PyPI's CPU wheel."
+    )
+    # And the Windows routing (added for OpenMicroDuck on win32): PyPI's
+    # win_amd64 torch 2.9.1 wheel is CPU-only too, so it must also point at a
+    # CUDA index. Keep the win32 entry in sync here so an accidental deletion
+    # (silently dropping Windows back to a CPU wheel) is caught.
+    assert any("sys_platform == 'win32'" in src["marker"] for src in sources), (
+        "the torch source must keep a win32-scoped entry -> Windows falls "
+        "back to PyPI's CPU wheel."
+    )
 
 
 def test_lockfile_routes_aarch64_torch_to_cuda_wheels():
@@ -96,11 +111,17 @@ def test_lockfile_routes_aarch64_torch_to_cuda_wheels():
 
 
 def test_x86_64_resolution_stays_on_pypi():
-    """HF Jobs run on x86_64: their resolution must not move."""
+    """HF Jobs run on linux x86_64: their resolution must not move.
+
+    Only the linux-x86_64 (and macOS) torch entry is required to stay on PyPI.
+    The win32 entry is intentionally routed to a PyTorch CUDA index (PyPI's
+    Windows torch 2.9.1 wheel is CPU-only), so it is excluded here.
+    """
     others = [
         p
         for p in _packages("torch")
         if "platform_machine == 'aarch64'" not in _markers(p)
+        and "sys_platform == 'win32'" not in _markers(p)
     ]
     assert others, "no non-aarch64 torch entry found"
     for pkg in others:
@@ -109,6 +130,27 @@ def test_x86_64_resolution_stays_on_pypi():
             "wheels."
         )
         assert "+cu" not in pkg["version"], "x86_64 torch must not be CUDA-pinned"
+
+
+def test_win32_resolution_routes_to_a_cuda_index():
+    """Windows (OpenMicroDuck dev machines) must get a CUDA torch wheel.
+
+    PyPI's torch 2.9.1 win_amd64 wheel is CPU-only (torch.__version__ ==
+    \"2.9.1+cpu\"), so the win32 entry must resolve from a PyTorch CUDA index
+    with a +cuXXX wheel — otherwise `train` dies in mjlab's select_gpus().
+    """
+    win = [
+        p for p in _packages("torch") if "sys_platform == 'win32'" in _markers(p)
+    ]
+    assert win, "no win32 torch entry found in uv.lock"
+    for pkg in win:
+        assert _registry(pkg).startswith(_CUDA_INDEX), (
+            f"win32 torch comes from {_registry(pkg)!r} — a CPU wheel. "
+            "Re-run `uv lock` after checking [tool.uv.sources]."
+        )
+        assert "+cu" in pkg["version"], "win32 torch must be CUDA-pinned"
+        wheels = " ".join(w["url"] for w in pkg["wheels"])
+        assert "win_amd64" in wheels, "no win_amd64 wheel in the win32 torch entry"
 
 
 def test_torch_version_identical_across_platforms():
