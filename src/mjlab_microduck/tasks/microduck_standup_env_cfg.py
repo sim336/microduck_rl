@@ -1001,7 +1001,7 @@ def make_microduck_standup_env_cfg(
             "reward_name":   "joint_torque_rate_l2",
             "weight_stages": [
                 {"step": 0,          "weight": 0.0},
-                {"step": 3000 * 24,  "weight": -1e-3},
+                {"step": 3000 * 24,  "weight": -1e-3},  # keep at official value: 2x bump (-2e-3) regressed the stand (2026-09-16)
             ],
         },
     )

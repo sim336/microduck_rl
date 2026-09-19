@@ -9,10 +9,13 @@ import pickle
 import queue
 import select
 import sys
-import termios
+try:  # Windows 兼容：termios/tty 是 Unix 专属，仅用于键盘控制
+    import termios
+    import tty
+except ImportError:
+    termios = tty = None
 import threading
 import time
-import tty
 from pathlib import Path
 import numpy as np
 import mujoco
@@ -149,50 +152,77 @@ DEFAULT_POSE = np.array([
 
 
 class TerminalInput:
-    """Single-keypress reader on stdin (cbreak mode, background thread).
+    """Single-keypress reader (background thread).
 
-    Replaces the MuJoCo viewer key_callback: keypresses in the viewer window
-    also fire the viewer's built-in visualization shortcuts (frames, labels,
-    rendering toggles…), so commands are read from the terminal instead.
-    Arrow keys arrive as ESC [ A/B/C/D escape sequences and are translated to
-    symbolic names ("up"/"down"/"left"/"right"); letters are lowercased.
-    cbreak (not raw) mode keeps ISIG enabled, so Ctrl+C still works.
+    Unix: reads stdin in cbreak mode (termios). Windows: polls the console
+    with msvcrt (termios is Unix-only and imported as None there — without
+    this backend keyboard control would be silently disabled). In both cases
+    arrow keys are translated to symbolic names and letters are lowercased.
     """
 
     _ARROWS = {"A": "up", "B": "down", "C": "right", "D": "left"}
+    _WIN_ARROWS = {"H": "up", "P": "down", "K": "left", "M": "right"}  # msvcrt scancodes
 
     def __init__(self):
         self._queue = queue.Queue()
-        self.enabled = sys.stdin.isatty()
-        self._fd = sys.stdin.fileno() if self.enabled else -1
-        self._old_attrs = None
         self._stop = threading.Event()
+        self._thread = None
+        if sys.platform == "win32":
+            import msvcrt
+            self._msvcrt = msvcrt
+            self.enabled = True  # console-based; works regardless of stdin being a TTY
+            self._fd = -1
+            self._old_attrs = None
+        else:
+            self._msvcrt = None
+            self.enabled = sys.stdin.isatty() and termios is not None
+            self._fd = sys.stdin.fileno() if self.enabled else -1
+            self._old_attrs = None
 
     def __enter__(self):
         if not self.enabled:
-            print("WARNING: stdin is not a TTY — keyboard control disabled")
+            print("WARNING: keyboard control disabled")
             return self
-        self._old_attrs = termios.tcgetattr(self._fd)
-        tty.setcbreak(self._fd)
-        threading.Thread(target=self._reader, daemon=True).start()
+        if self._msvcrt is None:
+            self._old_attrs = termios.tcgetattr(self._fd)
+            tty.setcbreak(self._fd)
+        self._thread = threading.Thread(target=self._reader, daemon=True)
+        self._thread.start()
         return self
 
     def __exit__(self, *exc):
         self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=0.5)
         if self._old_attrs is not None:
             termios.tcsetattr(self._fd, termios.TCSADRAIN, self._old_attrs)
 
     def _read1(self, timeout):
-        """Read one byte from stdin, or None on timeout. os.read (unbuffered):
-        buffered sys.stdin.read would swallow escape-sequence bytes past what
-        select reported ready."""
+        """Unix: read one byte from stdin, or None on timeout."""
         r, _, _ = select.select([self._fd], [], [], timeout)
         if not r:
             return None
         data = os.read(self._fd, 1)
         return data.decode(errors="ignore") if data else None
 
+    def _win_read1(self, timeout):
+        """Windows: read one char from the console, or None on timeout."""
+        deadline = time.monotonic() + timeout
+        while not self._stop.is_set():
+            if self._msvcrt.kbhit():
+                return self._msvcrt.getwch()
+            if time.monotonic() >= deadline:
+                return None
+            time.sleep(0.01)
+        return None
+
     def _reader(self):
+        if self._msvcrt is not None:
+            try:
+                self._reader_win()
+            except Exception as e:
+                print(f"WARNING: Windows keyboard reader failed ({e}) — keyboard control unavailable")
+            return
         while not self._stop.is_set():
             ch = self._read1(0.1)
             if not ch:
@@ -204,6 +234,19 @@ class TerminalInput:
                     if name:
                         self._queue.put(name)
                 continue  # bare ESC / unknown sequence: ignore
+            self._queue.put(ch.lower() if ch.isalpha() else ch)
+
+    def _reader_win(self):
+        while not self._stop.is_set():
+            ch = self._win_read1(0.05)
+            if not ch:
+                continue
+            if ch in "\x00\xe0":  # arrow / function-key prefix
+                code = self._win_read1(0.2)
+                name = self._WIN_ARROWS.get(code) if code else None
+                if name:
+                    self._queue.put(name)
+                continue
             self._queue.put(ch.lower() if ch.isalpha() else ch)
 
     def get_keys(self):
@@ -925,6 +968,15 @@ def main():
     parser.add_argument("--debug", action="store_true", help="Print observations and actions")
     parser.add_argument("--save-csv", type=str, default=None, help="Save observations and actions to CSV file")
     parser.add_argument("--record", type=str, default=None, help="Enable recording mode: save observations to pickle file on Ctrl+C")
+    parser.add_argument("--headless", type=int, default=None, metavar="N",
+                        help="Debug mode: run N control steps WITHOUT the viewer window, log trunk_z/tilt "
+                             "every 10 steps and exit. For sweeping parameters / fall detection.")
+    parser.add_argument("--spawn", type=str, default="standing",
+                        choices=["standing", "face_up", "face_down", "sit"],
+                        help="Starting posture. standing (default) = existing upright pose. "
+                             "face_up/face_down/sit spawn the robot LYING DOWN on standby gains "
+                             "with the policy PAUSED; press T to execute the standup policy. "
+                             "Useful to test a standup model from a lying start.")
     parser.add_argument("--switch-threshold", type=float, default=0.05, help="Vel command magnitude threshold for walking/standing switch (default: 0.05)")
     parser.add_argument("--ground-pick-period", type=float, default=4.0, help="Ground pick phase period in seconds (default: 4.0)")
     parser.add_argument("--new-cmd-obs", action="store_true",
@@ -1102,18 +1154,40 @@ def main():
         policy.vel_min_y = -0.2
         policy.vel_max_ang = 1.5
 
-    # Set initial position to default pose
+    # Set initial pose. Default is the existing upright default_pose (@ current
+    # height). --spawn {face_up,face_down,sit} lays the robot DOWN: trunk at a
+    # low height with pitch rolled over, joints at default_pose. The policy is
+    # left PAUSED on standby gains (see below) so a standup policy can then be
+    # triggered with T from a realistic lying start.
+    _lying_spawn = args.spawn != "standing"
+    if args.spawn == "standing":
+        spawn_z = 0.1385 if args.roller else 0.125  # rollers add 13.5mm height
+        spawn_quat = [1, 0, 0, 0]
+    elif args.spawn == "face_up":       # back to floor: pitch -90°
+        spawn_z = 0.05
+        spawn_quat = [math.cos(-math.pi / 4), math.sin(-math.pi / 4), 0, 0]
+    elif args.spawn == "face_down":     # belly to floor: pitch +90°
+        spawn_z = 0.05
+        spawn_quat = [math.cos(math.pi / 4), math.sin(math.pi / 4), 0, 0]
+    else:  # "sit" — reuse the sitting-style knee bend from the env keyframe
+        spawn_z = 0.060
+        spawn_quat = [1, 0, 0, 0]
     freejoint_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, "trunk_base_freejoint")
     qpos_adr = model.jnt_qposadr[freejoint_id]
     data.qpos[qpos_adr + 0] = 0.0
     data.qpos[qpos_adr + 1] = 0.0
-    data.qpos[qpos_adr + 2] = 0.1385 if args.roller else 0.125  # rollers add 13.5mm height
-    data.qpos[qpos_adr + 3:qpos_adr + 7] = [1, 0, 0, 0]
+    data.qpos[qpos_adr + 2] = spawn_z
+    data.qpos[qpos_adr + 3:qpos_adr + 7] = spawn_quat
     for i, qpos_idx in enumerate(policy.joint_qpos_indices):
         data.qpos[qpos_idx] = policy.default_pose[i]
     if bam_ctrl is not None:
-        bam_ctrl.reset(data.qpos)   # clears voltage-drop state, q_target = current qpos
-    policy.set_position_targets(policy.default_pose)
+        bam_ctrl.reset()                                        # clears voltage-drop state
+        bam_ctrl.q_target[:] = data.qpos[bam_ctrl.qpos_indexes] # q_target = current qpos
+    # Hold the spawn pose when lying (standby), or the standing default_pose
+    # otherwise — for a paused run the motors must hold wherever the bot starts.
+    _spawn_targets = policy.default_pose if args.spawn == "standing" else [
+        data.qpos[idx] for idx in policy.joint_qpos_indices]
+    policy.set_position_targets(_spawn_targets)
     mujoco.mj_forward(model, data)
 
     # Verify observation size
@@ -1171,11 +1245,11 @@ def main():
 
     csv_data = [] if args.save_csv else None
     recorded_observations = [] if args.record else None
-    policy_enabled = not args.record
+    policy_enabled = not (args.record or _lying_spawn)
     policy_enable_time = None
-    original_kp = None
-    if args.record:
-        original_kp = model.actuator_gainprm[:, 0].copy()
+    # Always capture the native gains: a lying --spawn starts in standby and
+    # must be able to restore full gains when the policy is enabled.
+    original_kp = model.actuator_gainprm[:, 0].copy()
 
     # Standby (--record) gains: the legacy path sets the position-actuator kp
     # to 2.0 (XML kp 0.55 ~ kp_fw 200). Under BAM apply the same ratio to the
@@ -1192,6 +1266,48 @@ def main():
             kp = _STANDBY_KP if on else original_kp[i]
             model.actuator_gainprm[i, 0] = kp
             model.actuator_biasprm[i, 1] = -kp
+
+    # Lying pose helper. A lying start (--spawn) begins in standby; afterwards
+    # the F / U keys can toggle the prone posture at runtime and T re-enables
+    # the policy. `standby_active` records whether we're currently paused in a
+    # lying hold (needs full gains restored before the policy runs).
+    standby_active = _lying_spawn
+    if standby_active:
+        set_standby_gains(True)
+        print(f"\nLying start ({args.spawn}): policy PAUSED on standby gains. "
+              f"Press T to execute the standup policy.\n")
+
+    # Re-pose the robot at runtime. Mutates the freejoint + joint qpos and
+    # targets so a paused run holds the new posture. Used by F (face down) / U
+    # (face up) to lay the duck down, and internally at startup.
+    def set_spawn_pose(mode, announce=True):
+        nonlocal policy_enabled, standby_active
+        if mode == "face_up":       # back to floor: pitch -90°
+            _z, _quat = 0.05, [math.cos(-math.pi / 4), math.sin(-math.pi / 4), 0, 0]
+        elif mode == "face_down":   # belly to floor: pitch +90°
+            _z, _quat = 0.05, [math.cos(math.pi / 4), math.sin(math.pi / 4), 0, 0]
+        elif mode == "sit":
+            _z, _quat = 0.060, [1, 0, 0, 0]
+        else:                       # "standing"
+            _z, _quat = (0.1385 if args.roller else 0.125), [1, 0, 0, 0]
+        # Pause the policy and hold with standby gains while re-posing.
+        policy_enabled = False
+        if not standby_active:
+            set_standby_gains(True)
+            standby_active = True
+        data.qpos[qpos_adr + 2] = _z
+        data.qpos[qpos_adr + 3:qpos_adr + 7] = _quat
+        for _i, _idx in enumerate(policy.joint_qpos_indices):
+            data.qpos[_idx] = policy.default_pose[_i]
+        if bam_ctrl is not None:
+            bam_ctrl.q_target[:] = data.qpos[bam_ctrl.qpos_indexes]
+        _targets = policy.default_pose if mode == "standing" else [
+            data.qpos[_idx] for _idx in policy.joint_qpos_indices]
+        policy.set_position_targets(_targets)
+        mujoco.mj_forward(model, data)
+        if announce:
+            print(f"\nPose set to {mode}: policy PAUSED on standby gains. "
+                  f"Press T to execute the standup policy.\n")
 
     # Cache the trunk freejoint qvel address so the push handler can write to
     # the trunk's world-frame linear velocity directly (qvel[0..3]).
@@ -1218,7 +1334,8 @@ def main():
     quit_requested = False
 
     def handle_key(key):
-        nonlocal policy_enabled, quit_requested
+        nonlocal policy_enabled, quit_requested, standby_active
+        print(f"  key: {key}")
         try:
             if key == "up":
                 if policy.head_mode:
@@ -1276,9 +1393,22 @@ def main():
             elif key == "t":
                 # Toggle policy inference on/off. When OFF the controller stops
                 # querying the ONNX policy and the motors hold the last applied
-                # target (no fresh ctrl writes).
+                # target (no fresh ctrl writes). Enabling from a lying standby
+                # (either the startup --spawn or an F/U key press) first restores
+                # the full gains so the standup policy has the stiffness it was
+                # trained with.
+                if standby_active and not policy_enabled:
+                    set_standby_gains(False)
+                    standby_active = False
+                    print("  Restored full gains for policy execution.")
                 policy_enabled = not policy_enabled
                 print(f"Policy inference: {'ON' if policy_enabled else 'OFF (paused)'}")
+            elif key == "f":
+                # Lay the duck belly-side down (prone) and pause policy.
+                set_spawn_pose("face_down")
+            elif key == "u":
+                # Lay the duck back-side down (supine), belly to the sky.
+                set_spawn_pose("face_up")
             elif key == "g":
                 policy.trigger_ground_pick()
             elif key == "k":
@@ -1349,6 +1479,8 @@ def main():
         print("  A / E:            turn left/right (ang_vel_z)")
     print("  SPACE:            coast (zero all commands)")
     print("  T:                toggle policy inference on/off (paused = motors hold last target)")
+    print("  F:                lay duck face-down (belly to floor) + pause policy; T to stand it up")
+    print("  U:                lay duck face-up (on its back) + pause policy; T to stand it up")
     print("  G:                trigger ground pick (requires --ground-pick)")
     print("  Y:                toggle sit (with --sit/--sitstand) or slope mode (with --slope)")
     print("  K:                kick with LEFT foot (requires --kick-left)")
@@ -1369,6 +1501,63 @@ def main():
     print("  LEFT/RIGHT arrow: head_yaw ±step")
     print("  A / E:            head_roll ±step")
     print("  SPACE:            reset head offset to zero")
+
+    if args.headless is not None:
+        # Headless debug mode: step for N control steps with no viewer, logging
+        # trunk height + tilt. For a lying --spawn it first holds N_HOLD lying
+        # steps with the policy PAUSED (standby), then enables it (if a standup
+        # policy is loaded) so we can verify it rises from the floor.
+        import collections, math as _math
+        _hold = 100 if _lying_spawn else 0
+        _hold_len = _hold
+        _enabled = False
+        if _hold > 0:
+            print(f"[headless] holding lying spawn for {_hold} steps with policy PAUSED")
+        _fallen_steps = 0
+        _rose_steps = 0
+        for _hs in range(args.headless):
+            policy.update_ground_pick_phase(control_dt)
+            policy.update_behavior(control_dt)
+            if _hs >= _hold and not _enabled:
+                _enabled = True
+                if standby_active:
+                    set_standby_gains(False)
+                    standby_active = False
+                # A lying start is legitimately prone; only assess fall/rise
+                # against the upright target once the policy actually runs.
+                _fallen_steps = 0
+                _rose_steps = 0
+                print(f"[headless] enabling policy at step {_hs} (full gains restored)", flush=True)
+            if _enabled:
+                action = policy.infer()
+                policy.apply_action(action)
+            else:
+                action = np.zeros(policy.n_joints, dtype=np.float32)
+            for _ in range(decimation):
+                if bam_ctrl is not None:
+                    bam_ctrl.update()
+                mujoco.mj_step(model, data)
+            _qz = float(data.qpos[qpos_adr + 2])
+            _qw, _qx, _qy, _qzq = (float(data.qpos[qpos_adr + 3 + i]) for i in range(4))
+            _r22 = 1.0 - 2.0 * (_qx * _qx + _qy * _qy)          # body z . world z
+            _tilt = _math.degrees(_math.acos(max(-1.0, min(1.0, _r22))))
+            if _enabled:
+                if _tilt > 60.0:
+                    _fallen_steps += 1
+                    _rose_steps = 0
+                elif _qz > 0.09 and _tilt < 30.0:
+                    _rose_steps += 1
+            if _hs % 10 == 0 or (_enabled and _fallen_steps > 20) or _hs == _hold_len:
+                print(f"[headless {_hs:4d}] trunk_z={_qz*1000:6.1f}mm  tilt={_tilt:6.1f}deg  "
+                      f"(enabled={_enabled}, fallen_steps={_fallen_steps}, rose_steps={_rose_steps})", flush=True)
+            if _enabled and _rose_steps >= 50:
+                print(f"[headless] STOOD UP at step {_hs} (trunk_z={_qz*1000:.1f}mm, tilt={_tilt:.1f}deg)", flush=True)
+                break
+            if _enabled and _fallen_steps >= 50:
+                print(f"[headless] FELL at step {_hs} (trunk_z={_qz*1000:.1f}mm, tilt={_tilt:.1f}deg)", flush=True)
+                break
+        print("\nInference stopped (headless).")
+        return
 
     with TerminalInput() as term, \
          mujoco.viewer.launch_passive(model, data, show_left_ui=False, show_right_ui=False) as viewer:

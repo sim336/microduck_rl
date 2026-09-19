@@ -23,6 +23,7 @@ SRC_XML = str(ROBOT / "robot_walk.xml")
 OUT_XML = str(ROBOT / "robot_openmicroduck.xml")
 PARTS = None  # set via --parts-dir or env OPENMICRODUCK_PARTS
 
+SERVO_MESHES = {"xl330", "hd1910"}   # mesh names used for the servo bodies
 RESIN_DENS = 1.15       # g/cm3 (high-toughness resin)
 XL330_MASS = 18.0       # g
 HD1910_MASS = 21.0      # g
@@ -52,11 +53,13 @@ def set_inertial(body, mass, inertia, pos, scale=1.0):
         inert.set("pos", pos)
 
 
-def main(parts_dir):
-    global PARTS, SRC_XML, OUT_XML
+def main(parts_dir, output=None):
+    global PARTS, OUT_XML
     PARTS = parts_dir
-    SRC_XML = str(ROBOT / "robot_walk.xml")
-    OUT_XML = str(ROBOT / "robot_openmicroduck.xml")
+    if output:
+        OUT_XML = output
+    else:
+        OUT_XML = str(ROBOT / "robot_openmicroduck.xml")
     ET.register_namespace("", "")
     tree = ET.parse(SRC_XML)
     root = tree.getroot()
@@ -78,7 +81,7 @@ def main(parts_dir):
             mesh = g.get("mesh")
             if not mesh:
                 continue
-            if mesh == "xl330":
+            if mesh in SERVO_MESHES:
                 servo_n += 1
             else:
                 v = shell_volume(mesh)
@@ -88,7 +91,7 @@ def main(parts_dir):
         off_part = 0.0
         for g in body.findall("geom"):
             mesh = g.get("mesh")
-            if mesh and mesh != "xl330":
+            if mesh and mesh not in SERVO_MESHES:
                 v = shell_volume(mesh)
                 if v is not None:
                     off_part += v * OFFICIAL_PART_DENS
@@ -117,6 +120,4 @@ if __name__ == "__main__":
     pd = args.parts_dir or os.environ.get("OPENMICRODUCK_PARTS")
     if not pd:
         raise SystemExit("set --parts-dir or OPENMICRODUCK_PARTS to the OpenMicroDuck cad/parts dir")
-    if args.output:
-        OUT_XML = args.output
-    main(pd)
+    main(pd, args.output)
