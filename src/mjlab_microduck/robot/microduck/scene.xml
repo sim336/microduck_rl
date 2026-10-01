@@ -1,5 +1,10 @@
 <mujoco model="scene">
-    <include file="robot_groundcontact.xml" />
+    <!-- OpenMicroDuck（HD-1910-C001 舵机）几何：tree / 关节限位与官方一致，但每块
+         body 的惯量按"树脂打印件 1.15 g/cm³ + 每颗舵机 21 g"重算过。训练侧
+         （microduck_constants.py 的 USE_HD1910=True）用的就是这一套，这里换成它
+         是为了让 body_server 的仿真身体和训练环境是同一只鸭子。
+         官方 XL330 版本是 robot_groundcontact.xml（舵机 18 g），保留不动。 -->
+    <include file="robot_openmicroduck_groundcontact.xml" />
 
     <visual>
         <headlight diffuse="0.6 0.6 0.6" ambient="0.3 0.3 0.3" specular="0 0 0" />

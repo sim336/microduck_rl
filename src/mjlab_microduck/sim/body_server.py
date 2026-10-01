@@ -91,6 +91,11 @@ SCENES = Path(__file__).resolve().parents[1] / "robot" / "microduck"
 # `scene.xml`, not `scene_walk.xml`: the walking scene includes the model the RL work trains
 # against, whose actuator default classes carry `contype="0" conaffinity="0"`, so the robot collides
 # with nothing and sinks through a floor the scene really does contain.
+#
+# `scene.xml` includes `robot_openmicroduck_groundcontact.xml` — the OpenMicroDuck geometry the
+# HD-1910 training env uses (resin printed parts + 21 g servos), so the body here and the body the
+# policies were trained on are the same duck. It was `robot_groundcontact.xml` (official XL330,
+# 18 g servos) before 2026-09-29.
 DEFAULT_SCENE = SCENES / "scene.xml"
 # The robot with no floor and no scenery — what extra ducks are attached from.
 ROBOT_ONLY = SCENES / "robot_allcollisions.xml"
