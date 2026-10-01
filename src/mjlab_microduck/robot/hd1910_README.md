@@ -1,12 +1,43 @@
-# HD-1910-C001 BAM 执行器模型（首性估算）
+# HD-1910-C001 BAM 执行器模型（首性估算 → 台架标定）
 
-本文件说明 `hd1910_m6.json` 的参数来源与假设。该模型是 **OpenMicroDuck
-（飞特 HD-1910-C001 舵机）** 的训练执行器模型，替换官方 microduck_rl 的
-Dynamixel XL330 BAM M6 模型。
+> ## ⚠️ 本文已过时，请勿据此校参数（2026-10-01 标注）
+>
+> 本文记录的是**台架标定之前**的首性估算过程，以及其中仍然有效的规格书推导
+> （下节的规格表、6 V 运动特性图提取、`R = 3.75 Ω` 的反推）。文中**所有"当前取值"
+> 的判断都已被台架辨识取代**，具体三处：
+>
+> 1. **生效的模型文件不是本文描述的 `hd1910_m6.json`**。`vendor/bam/bam/params/hd1910/`
+>    下的 `m1..m6.json` 现已是 `bam.fit` 的拟合产物（`m6.json` 自身也被覆盖：kt 0.692、
+>    `"actuator": "hd1910"`、`max_current` 3.25 —— 与本文写的 0.735 / xl330 / 1.75 不符）。
+>    **当前生效的是 `m5.json`**，由 `microduck_constants.py` 的 `model="m5"` 指定。
+> 2. **`kt` 不再是规格书值。** 台架空载恒速法实测 0.692 N·m/A（R²=0.998，n=24，6 档转速
+>    正反两向各两条），落在 93–95% 规格书值区间内，且被独立方法（静态保持法
+>    `kt/R ∈ [0.16, 0.23]`）交叉验证。判据链与出处见同目录 `characterization.json`。
+> 3. **不再复用 XL330 的控制律骨架**：`"actuator": "hd1910"`，`kp_fw = 32`（真机 reg50
+>    回读，不是 200），`kd` 来自拟合（真机侧 reg51 钉在 40）。
+>
+> **权威落地记录是 [`vendor/bam/bam/params/hd1910/characterization.json`](../../../vendor/bam/bam/params/hd1910/characterization.json)，
+> 不是本文。** 下表是本文写作时的估算值与现行生效值的对照：
 
-> ⚠️ **状态：首性估算（first-principles estimate）**，尚未经台架（testbench）
-> 标定。训练可用，但 sim2real 保真度需要按 `bam.fit` 实测标定后替换
-> `kt / R / armature` 与摩擦参数。
+| 项 | 本文（首性估算） | 现行生效值 | 出处 |
+|---|---|---|---|
+| 模型文件 | `hd1910_m6.json` | `params/hd1910/m5.json` | `microduck_constants.py:model="m5"` |
+| `kt` | 0.7358（规格书 7.5 kg·cm/A） | **0.692**（实测） | `characterization.json` |
+| `R` | 3.75 Ω | 3.75 Ω（未变） | 规格书 + 运动特性图外推 |
+| `actuator` 骨架 | 复用 `"xl330"` | `"hd1910"` | `bam/feetech/actuator.py:HD1910Actuator` |
+| `kp_fw` | 200 | **32**（reg50 回读） | 真机回读 |
+| `max_current` | 1.75 A | 3.25 A | `m5.json` |
+| 供电基准 | 6 V 设计点 | **2S 电池 6.5–8.2 V** | 见"训练注意 › 供电基准更正" |
+| `forcerange` | ±1.65 N·m | **±1.51 N·m** = 8.2×0.692/3.75 | `BamActuator.initialize()` 打印 |
+| 摩擦参数 | 按 XL330 扭矩尺度缩放 | `bam.fit` 台架拟合 | `m5.json` |
+| `armature` | 0.003（反演估计） | 0.002243（拟合） | `m5.json` |
+| `error_gain` | 待示波器实测 | 0.163（拟合） | `m5.json` |
+
+---
+
+本文件说明 HD-1910-C001（飞特）训练执行器模型的**参数来源与推导过程**。该模型是
+**OpenMicroDuck** 的整机模型，替换官方 microduck_rl 的 Dynamixel XL330 BAM M6 模型。
+下文保留首性估算的完整推导链，作为规格书核对与直觉校验的存档。
 
 ## 数据来源
 

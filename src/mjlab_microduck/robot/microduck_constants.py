@@ -30,6 +30,15 @@ OPENMICRODUCK_WALK_XML: Path = _ROBOT_DIR / "robot_openmicroduck_walk.xml"
 # top/bottom head shells, jaw). Used by standup / sitstand / roulade tasks
 # under the HD-1910 actuator instead of falling back to the walk model.
 OPENMICRODUCK_GROUNDCONTACT_XML: Path = _ROBOT_DIR / "robot_openmicroduck_groundcontact.xml"
+# Backlash variants of the two OpenMicroDuck models above: same geometry, plus an
+# unactuated +/-1 deg hinge in series with every servo joint. Exported by
+# microduck/add_backlash.py with its defaults, which is the same tool and the same
+# 2 deg total play the official robot_{groundcontact,walk}_backlash.xml carry — so
+# the backlash task family reads the HD-1910 geometry instead of falling back to
+# the XL330-inertia model (the inertials must match the actuator being identified,
+# or a backlash-vs-base comparison silently compares two robots).
+OPENMICRODUCK_GROUNDCONTACT_BACKLASH_XML: Path = _ROBOT_DIR / "robot_openmicroduck_groundcontact_backlash.xml"
+OPENMICRODUCK_WALK_BACKLASH_XML: Path = _ROBOT_DIR / "robot_openmicroduck_walk_backlash.xml"
 # Ground-contact model (formerly "allcollisions"): curated collision set for
 # the parts that touch the floor in body-on-ground tasks (soles, legs, trunk
 # shells, head shells, jaw, battery, hips) — NOT every geom. Shared by
@@ -53,6 +62,8 @@ MICRODUCK_GROUNDCONTACT_ROLLERS_BACKLASH_XML: Path = _ROBOT_DIR / "robot_groundc
 assert MICRODUCK_WALK_XML.exists(), f"XML not found: {MICRODUCK_WALK_XML}"
 assert MICRODUCK_GROUNDCONTACT_XML.exists(), f"XML not found: {MICRODUCK_GROUNDCONTACT_XML}"
 assert OPENMICRODUCK_GROUNDCONTACT_XML.exists(), f"XML not found: {OPENMICRODUCK_GROUNDCONTACT_XML}"
+assert OPENMICRODUCK_GROUNDCONTACT_BACKLASH_XML.exists(), f"XML not found: {OPENMICRODUCK_GROUNDCONTACT_BACKLASH_XML}"
+assert OPENMICRODUCK_WALK_BACKLASH_XML.exists(), f"XML not found: {OPENMICRODUCK_WALK_BACKLASH_XML}"
 assert MICRODUCK_ALLCOLLISIONS_XML.exists(), f"XML not found: {MICRODUCK_ALLCOLLISIONS_XML}"
 assert MICRODUCK_BALL_XML.exists(), f"XML not found: {MICRODUCK_BALL_XML}"
 assert MICRODUCK_GROUNDCONTACT_ROLLERS_XML.exists(), f"XML not found: {MICRODUCK_GROUNDCONTACT_ROLLERS_XML}"
@@ -71,6 +82,14 @@ def get_openmicroduck_walk_spec() -> mujoco.MjSpec:
 
 def get_openmicroduck_groundcontact_spec() -> mujoco.MjSpec:
     return mujoco.MjSpec.from_file(str(OPENMICRODUCK_GROUNDCONTACT_XML))
+
+
+def get_openmicroduck_backlash_spec() -> mujoco.MjSpec:
+    return mujoco.MjSpec.from_file(str(OPENMICRODUCK_GROUNDCONTACT_BACKLASH_XML))
+
+
+def get_openmicroduck_walk_backlash_spec() -> mujoco.MjSpec:
+    return mujoco.MjSpec.from_file(str(OPENMICRODUCK_WALK_BACKLASH_XML))
 
 
 def get_standup_spec() -> mujoco.MjSpec:
@@ -163,14 +182,31 @@ WALK_COLLISION = CollisionCfg(
 #   - vin_drop_resistance_range: load-dependent sag V_drop = R * I_bat (battery + wire resistance)
 #   - vin_min: hard floor on the effective voltage after sag
 # HD-1910: kp_fw = 32 is the servo's real firmware Kp (reg50). The HD-1910 branch
-# below is the 5 V-regulated, bench-identified (m5) configuration.
+# below is the bench-identified (m5) configuration on the robot's 2S rail.
 if USE_HD1910:
     # Feetech HD-1910-C001 (OpenMicroDuck). CALIBRATED parameters from the
     # upstream joyandai/microduck_rl identity work: BAM bam/params/hd1910/m5.json
-    # (identified on the pendulum bench at 5.0-5.2 V) + Feetech voltage-controlled
-    # control law (bam/feetech/actuator.py HD1910Actuator). The real robot is
-    # powered by a REGULATED 5.0 V rail (4.75-5.25 V) — NOT 2S — so the
-    # bench-identified params transfer without any voltage rescaling.
+    # + Feetech voltage-controlled control law (bam/feetech/actuator.py
+    # HD1910Actuator).
+    #
+    # 2026-10-01 CORRECTION — supply basis was wrong. This block used to claim the
+    # robot runs on "a REGULATED 5.0 V rail (4.75-5.25 V) — NOT 2S" and set
+    # vin_range to match. 5.0 V was the *pendulum bench supply*, not the robot.
+    # The robot is 2S (user-confirmed) and all 15 servos hang directly off the
+    # pack, so the actuator sees the pack:
+    #   - bam/feetech/actuator.py:404 — the servo is a 4-8.4 V part, typical 6 V;
+    #   - duck-control/src/feetech.rs:608 — "all 15 servos sit on one pack"; the
+    #     reg62 present_voltage robotd averages IS the pack, not a 5 V rail;
+    #   - robotd's empty-pack shutdown fires at battery_v <= 6.6 V, which a 5 V
+    #     reading would trip on every boot. It never did.
+    # This matters because the torque the model delivers is `vin * duty_cycle`:
+    # a 5 V basis made the simulated servo 1.48x weaker than the real one
+    # (7.4/5.0). That is also the direction and size of the long-standing
+    # bench-vs-sim saturation mismatch (sim 21% vs robot 4.2%).
+    # The bench ran at 5 V, but what it identified is in the torque domain
+    # (friction, armature, q_offset, command_delay) and is voltage-independent —
+    # only the supply basis moves. vin_range/vin_min now mirror the official
+    # XL330 branch's 2S envelope below.
     _BAM_ACTUATOR_KWARGS = dict(
         motor_name="hd1910",
         model="m5",
@@ -179,14 +215,16 @@ if USE_HD1910:
         # the real servo). NOT the old 200/125 — those were XL330-era stiffnesses;
         # 200 here would be ~6x too stiff.
         kp_fw=32.0,
-        # Regulated 5.0 V ±5% DR. Falls back to the servo's 4 V low-voltage-alarm
-        # floor after the load-dependent sag.
-        vin_range=(4.75, 5.25),
+        # 2S LiPo envelope, matching the official XL330 branch: 8.2 V full under
+        # charge, 6.5 V near the end of the pack. NOT the bench supply's 5 V.
+        vin_range=(6.5, 8.2),
         # Sag V_drop = R * I_bat (battery + wire resistance, supply property). The
         # 0.069 Ohm ceiling was proven on the XL330 rail; HD's larger kt draws less
         # current per N·m, so 0.069 Ohm is a conservative upper bound.
         vin_drop_resistance_range=(0.0, 0.069),
-        vin_min=4.0,
+        # Floor after sag, as the XL330 branch uses. (Was 4.0 = the servo's own
+        # low-voltage alarm — unreachable on a 2S pack.)
+        vin_min=6.0,
         # Command latency from the bench characterization (command_delay 0.023-0.031 s).
         # BamActuator latency is modeled by these lags in SIM SUBSTEPS (0.005 s):
         # 0.023-0.031 / 0.005 = 4.6-6.2 → (4, 7) = 20-35 ms to bracket the measured
@@ -259,7 +297,7 @@ MICRODUCK_STANDUP_ROBOT_CFG = EntityCfg(
 )
 
 MICRODUCK_GROUND_PICK_ROBOT_CFG = EntityCfg(
-    spec_fn=get_ground_pick_spec,
+    spec_fn=get_openmicroduck_groundcontact_spec if USE_HD1910 else get_ground_pick_spec,
     init_state=HOME_FRAME,
     collisions=(FULL_COLLISION,),
     articulation=EntityArticulationInfoCfg(
@@ -276,7 +314,7 @@ MICRODUCK_GROUND_PICK_ROBOT_CFG = EntityCfg(
 # tasks (mirrors MICRODUCK_WALK_ROBOT_CFG, keeps backlash-vs-base comparisons
 # unconfounded by the collision model).
 MICRODUCK_BACKLASH_ROBOT_CFG = EntityCfg(
-    spec_fn=get_backlash_spec,
+    spec_fn=get_openmicroduck_backlash_spec if USE_HD1910 else get_backlash_spec,
     init_state=BACKLASH_HOME_FRAME,
     collisions=(FULL_COLLISION,),
     articulation=EntityArticulationInfoCfg(
@@ -286,7 +324,7 @@ MICRODUCK_BACKLASH_ROBOT_CFG = EntityCfg(
 )
 
 MICRODUCK_WALK_BACKLASH_ROBOT_CFG = EntityCfg(
-    spec_fn=get_walk_backlash_spec,
+    spec_fn=get_openmicroduck_walk_backlash_spec if USE_HD1910 else get_walk_backlash_spec,
     init_state=BACKLASH_HOME_FRAME,
     collisions=(WALK_COLLISION,),
     articulation=EntityArticulationInfoCfg(
@@ -321,6 +359,16 @@ MICRODUCK_BALL_CFG = EntityCfg(
 # space stays 14-dimensional. Uses the SAME canonical BAM actuator as every
 # other variant (was a plain XmlActuatorCfg PD — an actuator-physics mismatch
 # vs the rest of the family, and joint-friction DR was impossible).
+#
+# KNOWN GAP (2026-10-01): the two ROLLERS_* configs below — this one and
+# MICRODUCK_ROLLERS_BACKLASH_ROBOT_CFG — still load the official XL330-inertia
+# models. They are the only configs in this module without a `USE_HD1910` branch,
+# and there is nothing to point that branch at: the OpenMicroDuck export has no
+# wheel variant (no robot_openmicroduck_*rollers*.xml), and building one means
+# re-running the onshape-to-robot CAD export with the wheels attached, not a
+# text edit — the 4 tire bodies bring their own joints, meshes and inertials.
+# Roller tasks are experimental and have never been run, so the mixed
+# XL330-inertia + HD-1910-actuator combination there is inert rather than wrong.
 MICRODUCK_WALK_ROLLERS_ROBOT_CFG = EntityCfg(
     spec_fn=get_walk_rollers_spec,
     init_state=HOME_FRAME,

@@ -25,7 +25,11 @@ SCHEMA_VERSION = 2
 MODEL_API = 1
 OBS_LEN = 61
 ACTION_LEN = 14
-ROBOT: dict[str, Any] = {"model": "microduck", "hw_rev": 1, "servos": "xl330", "control_hz": 50}
+# `servos` is display-only (`docs/policy-manifest.md`: robot.model is the one field the daemon
+# checks, see `validate` below), but it is what a reader uses to tell which plant the weights were
+# trained against, so it has to name the servo actually on this robot: OpenMicroDuck runs
+# HD-1910-C001 over FT-SCS, not the upstream XL330 (`robot/microduck_constants.py:USE_HD1910`).
+ROBOT: dict[str, Any] = {"model": "microduck", "hw_rev": 1, "servos": "hd1910", "control_hz": 50}
 
 # The one `.onnx` a repo carries. The daemon takes the sole `.onnx` in a repo and refuses several.
 POLICY_FILE = "policy.onnx"

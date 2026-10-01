@@ -3,6 +3,7 @@
   "model_name": "Feetech HD-1910-C001 (reg3=7946)",
   "generated": "2026-09-10 18:51:48",
   "supply_voltage_V": 5.0,
+  "supply_voltage_V_note": "⚠️ 2026-10-01 更正: 这是【台架摆锤台的供电电压】, 不是整机母线。整机由 2S 锂电直接供电 (6.5-8.2 V, 标称 7.4), 15 颗舵机全部挂在电池包上 (duck-control/src/feetech.rs:608 'all 15 servos sit on one pack'; robotd reg62 present_voltage 读到的就是电池包)。下方 note_supply 原结论已作废。本次更正只动供电基准, 不改任何辨识数值 —— kt/R/摩擦/armature/q_offset/command_delay 都是扭矩域或时域量, 与供电电压无关。",
   "how_to_read": "source: measured=台架实测 / readback=真机寄存器回读 / datasheet=规格书 / fitted=BAM 辨识产物 / assumption=未验证假设",
   "parameters": {
     "kt": {
@@ -90,7 +91,7 @@
       "value": 8.0282,
       "unit": "rad/s",
       "source": "datasheet",
-      "note": "@6V 规格 9.6338 按 5V 折算；实测轨迹峰值 8.62 → 待空载全速实测"
+      "note": "@6V 规格 9.6338 按 5V 折算；实测轨迹峰值 8.62 → 待空载全速实测。⚠️ 2026-10-01: 折算基准错 (整机是 2S 非 5V), 按 7.4V 折算应约 11.83 rad/s。但本项默认【不生效】—— use_rate_limiting=False (真机 reg84/85/86 回读为 0), max_velocity 不参与控制律, 仅 use_rate_limiting=True 时才用。故未改动数值。"
     },
     "max_acceleration": {
       "value": 500.0,
@@ -252,5 +253,5 @@
     ],
     "alt_batch": "同目录 m{1..6}_alt.json = 2026-09-10 16:49 的另一批拟合(独立验证 0.042-0.044 rad), 留档不用"
   },
-  "note_supply": "整机与台架统一 5.0 V 稳压(2026-09-10 确认); 辨识数据全程 5.0-5.2 V ⇒ 参数直接迁移, 无需电压换算"
+  "note_supply": "【2026-10-01 作废】原文: '整机与台架统一 5.0 V 稳压(2026-09-10 确认); 辨识数据全程 5.0-5.2 V ⇒ 参数直接迁移, 无需电压换算'。前半句错 —— 台架是 5.0 V 稳压电源, 但【整机是 2S 锂电】, 两者并不统一。辨识数据确实全程 5.0-5.2 V (这点没错), 且标定出的量在扭矩域/时域, 与供电无关, 故'参数直接迁移'的结论仍然成立 —— 迁移的是参数, 不是电压工作点。训练侧 vin_range 已由 (4.75,5.25) 改为 (6.5,8.2)、vin_min 4.0→6.0, 以匹配 2S。"
 }

@@ -518,8 +518,12 @@ class HD1910Actuator(VoltageControlledActuator):
         self.p_scale = p_scale
         self.d_scale = d_scale
 
-        # 固件"运行速度"上限 [rad/s] = 规格书空载转速 @6 V 92 RPM 按 5.0 V 折算 = 8.03 rad/s；
-        # （2026-09-10 起台架与整机统一按 5.0 V 供电，故默认值同步为 5 V 折算值）
+        # 固件"运行速度"上限 [rad/s] = 规格书空载转速 @6 V 92 RPM 按 5.0 V 折算 = 8.03 rad/s。
+        # 【2026-10-01 更正】"台架与整机统一按 5.0 V 供电"是错的：5.0 V 只是摆锤台架的
+        # 桌面电源，整机是 2S 电池（8.2 V 满电 / 6.5 V 近空）且 15 个舵机直接挂在电池上，
+        # 故该值对应的折算基准不成立（按 7.4 V 名义应 ≈ 11.8 rad/s）。之所以没有改数：
+        # 它只在 use_rate_limiting=True 时才参与限幅，而默认为 False（下同），且真机回读
+        # reg84/85/86 = 0 —— 即模式 4 下该字段在仿真和真机上都不生效。
         # 真机回读 reg84/85/86 = 0（模式 4 无目标速度/加速度限幅），故默认不做爬坡，
         # 该值仅在 use_rate_limiting=True 时才参与目标限幅。
         # TODO(标定): 直流电机空载速度（kt/R 推出 6/0.7358 ≈ 8.15 rad/s）与规格书
@@ -530,7 +534,13 @@ class HD1910Actuator(VoltageControlledActuator):
         # TODO(标定): 加速度/爬坡在模式 4 经回读确认不存在，此值仅保留给 use_rate_limiting。
         self.default_max_acceleration = 500.0
 
-        # 便捷可见性属性（与 initialize() 中 model 参数初值保持一致，供日志/自测读取）。
+        # 便捷可见性属性（供日志/自测读取）。
+        # 注意 kt 这一项**不是**生效值，不要拿它算力/算电流：控制律用的是
+        # self.model.kt.value（见 compute_control 的 back_emf / duty_span），而
+        # load_model_from_dict 会在本构造函数之后用模型 JSON 覆盖它。HD-1910 的
+        # m5.json 里 kt=0.692（台架空载恒速法实测，R²=0.998），所以生效值是 0.692，
+        # 这里的 0.7358 只是规格书默认值（规格书 7.5 kg·cm/A）。R/max_velocity/
+        # max_acceleration/kd 恰好与 m5.json 相同，故仍与生效值一致。
         self.kt = 0.7358
         self.R = 3.75
         self.max_velocity = self.default_max_velocity
