@@ -340,6 +340,24 @@ def make_microduck_velstand_env_cfg(play: bool = False, rough: bool = False) -> 
         },
     )
 
+    # Zero-command standing coverage — raised for THIS robot (real-robot lesson
+    # 2026-10-01): opening the walk slot made the duck step off with no twist
+    # command. On the board `stand = "none"`, so the walk network is the ONLY
+    # thing that owns zero-command idle — unlike the official set where a
+    # dedicated standing slot can take over. The shared velocity schedule stops
+    # at 0.25; here the exact-zero bucket ramps a little harder and a little
+    # earlier, so "hold the nominal pose on a zero twist" is a first-class
+    # deliverable rather than a 25% side case. Still well under the 45% prone
+    # cap's complement, so the walking data share stays dominant.
+    cfg.curriculum["standing_envs"].params["standing_stages"] = [
+        {"step": 0,          "rel_standing_envs": 0.02},
+        {"step": 500 * 24,   "rel_standing_envs": 0.08},
+        {"step": 750 * 24,   "rel_standing_envs": 0.14},
+        {"step": 1000 * 24,  "rel_standing_envs": 0.20},
+        {"step": 1500 * 24,  "rel_standing_envs": 0.26},
+        {"step": 2000 * 24,  "rel_standing_envs": 0.30},
+    ]
+
     # Recovery economics ramp: tax + bounty OFF until the walk is established
     # (see RECOVERY_ECON_KICKIN_ITER note above — run-3 crouch-freeze lesson).
     cfg.curriculum["fallen_tax_weight"] = CurriculumTermCfg(
